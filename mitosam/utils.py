@@ -180,3 +180,78 @@ def percentile_normalize_batch(images, pmin=1.0, pmax=99.0, out_range=(0.0, 1.0)
         out_imgs.append(x.astype(np.float32))
 
     return out_imgs
+
+
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_random_image_mask_pairs(
+    images,
+    masks,
+    num_samples: int = 5,
+    seed: int | None = None,
+    cmap: str = "gray",
+    figsize: tuple[int, int] = (10, 4)
+):
+    """
+    Randomly plots image–mask pairs from a dataset.
+
+    Args:
+        images: Array-like of shape (N, H, W) or (N, H, W, C)
+            Dataset of images.
+        masks: Array-like of shape (N, H, W)
+            Dataset of corresponding masks.
+        num_samples: Number of random pairs to plot (default: 5).
+        seed: Optional random seed for reproducibility.
+        cmap: Colormap for imshow (default: 'gray').
+        figsize: Size of the entire figure.
+
+    Returns:
+        fig, axes: Matplotlib Figure and Axes objects.
+    """
+    images = np.asarray(images)
+    masks = np.asarray(masks)
+
+    assert len(images) == len(masks), (
+        f"images and masks must have the same length, "
+        f"got {len(images)} and {len(masks)}"
+    )
+
+    n = len(images)
+    if n == 0:
+        raise ValueError("Empty dataset: 'images' has length 0.")
+
+    # Ensure we don't request more samples than available
+    num_samples = min(num_samples, n)
+
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(n, size=num_samples, replace=False)
+
+    fig, axes = plt.subplots(2, num_samples, figsize=figsize)
+
+    if num_samples == 1:
+        # When num_samples=1, axes are not a 2D array, so normalize
+        axes = np.array([[axes[0]], [axes[1]]])
+
+    for col, idx in enumerate(indices):
+        img = images[idx]
+        msk = masks[idx]
+
+        # First row: images
+        ax_img = axes[0, col]
+        ax_img.imshow(img, cmap=cmap)
+        ax_img.set_title(f"Image {idx}")
+        ax_img.axis("off")
+
+        # Second row: masks
+        ax_msk = axes[1, col]
+        ax_msk.imshow(msk, cmap=cmap)
+        ax_msk.set_title(f"Mask {idx}")
+        ax_msk.axis("off")
+
+    plt.tight_layout()
+    return fig, axes
+
