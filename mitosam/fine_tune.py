@@ -209,3 +209,211 @@ print("reshaped_input_sizes:", enc0["reshaped_input_sizes"].tolist())  # [H_resi
 print("gt mask:", tuple(enc0["ground_truth_mask"].shape))           # (H_orig, W_orig) ~ (256, 256)
 
 
+# lets visualize the image, mask and prompt from iside SAM processor to ake sure, its resizing and mapping properly. 
+
+from sam_helper import visualize_sam_sample# From the dataset + index
+fig, axes = visualize_sam_sample(train_dataset, idx=13 )
+
+# --------------------------------------------------
+# Define the PEFT and LoRA configs.
+#---------------------------------------------------
+
+import torch
+from transformers import SamModel
+from monai.losses import DiceFocalLoss
+from peft import LoraConfig, get_peft_model, TaskType
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Base SAM model
+model = SamModel.from_pretrained("facebook/sam-vit-base")
+
+# LoRA config applied to attention/projection layers across SAM
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],  # attention proj layers
+    lora_dropout=0.05,
+    bias="none",
+    task_type=TaskType.FEATURE_EXTRACTION,  # vision / feature task
+)
+
+# IMPORTANT: wrap the WHOLE model, not model.mask_decoder
+model = get_peft_model(model, lora_config)
+
+model.print_trainable_parameters()  # sanity check: % of trainable params
+
+model.to(device)
+
+# Segmentation loss
+seg_loss = DiceFocalLoss(
+    sigmoid=True,
+    lambda_dice=1.0,
+    lambda_focal=1.0,
+    reduction="mean",
+)
+
+
+
+from tqdm import tqdm
+from statistics import mean
+import torch
+import matplotlib.pyplot as plt
+
+# ==========================
+# OPTIMIZER, SCHEDULER, EARLY STOP
+# ==========================
+
+# Train only parameters that actually require gradients (LoRA adapters, etc.)
+optimizer = torch.optim.Adam(
+    [p for p in model.parameters() if p.requires_grad],
+    lr=1e-3,   # Higher LR is fine for PEFT/LoRA
+)
+
+# Reduce LR when validation loss plateaus
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="min",
+    factor=0.5,      # LR = LR * 0.5
+    patience=3,      # epochs with no improvement before LR drop
+    threshold=0.001, # ignore improvements smaller than this
+    threshold_mode="abs",
+)
+
+early_stopping_patience = 7        # stop if no improvement for 7 epochs
+early_stopping_min_delta = 0.001   # need at least this much improvement in val loss
+
+best_val_loss = float("inf")
+epochs_without_improvement = 0
+
+best_model_path = (
+    "/content/drive/MyDrive/"
+    "Electron_Microscope_Practice_Projects/"
+    "Mitochondria_segmentation/best_sam_model.pth"
+)
+
+# ==========================
+# TRAINING LOOP
+# ==========================
+
+num_epochs = 50
+train_losses, val_losses = [], []
+
+for epoch in range(num_epochs):
+    # ---- TRAIN ----
+    model.train()
+    epoch_train_losses = []
+
+    for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
+        pixel_values = batch["pixel_values"].to(device)
+        input_boxes = batch["input_boxes"].to(device)
+        ground_truth_masks = batch["ground_truth_mask"].float().to(device)  # (B, H, W)
+
+        optimizer.zero_grad()
+
+        outputs = model(
+            pixel_values=pixel_values,
+            input_boxes=input_boxes,
+            multimask_output=False,
+        )
+
+        predicted_masks = outputs.pred_masks.squeeze(1)  # (B, H_pred, W_pred)
+
+        # Resize GT masks to match predicted mask size if needed
+        if ground_truth_masks.shape[-2:] != predicted_masks.shape[-2:]:
+            ground_truth_masks = torch.nn.functional.interpolate(
+                ground_truth_masks.unsqueeze(1),          # (B, 1, H, W)
+                size=predicted_masks.shape[-2:],          # (H_pred, W_pred)
+                mode="nearest",
+            ).squeeze(1)                                  # (B, H_pred, W_pred)
+
+        loss = seg_loss(
+            predicted_masks,
+            ground_truth_masks.unsqueeze(1),              # (B, 1, H, W)
+        )
+
+        loss.backward()
+        optimizer.step()
+
+        epoch_train_losses.append(loss.item())
+
+    mean_train_loss = mean(epoch_train_losses)
+    train_losses.append(mean_train_loss)
+
+    # ---- VALIDATION ----
+    model.eval()
+    epoch_val_losses = []
+
+    with torch.no_grad():
+        for batch in tqdm(val_dataloader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]"):
+            pixel_values = batch["pixel_values"].to(device)
+            input_boxes = batch["input_boxes"].to(device)
+            ground_truth_masks = batch["ground_truth_mask"].float().to(device)
+
+            outputs = model(
+                pixel_values=pixel_values,
+                input_boxes=input_boxes,
+                multimask_output=False,
+            )
+
+            predicted_masks = outputs.pred_masks.squeeze(1)
+
+            # Match spatial dims
+            if ground_truth_masks.shape[-2:] != predicted_masks.shape[-2:]:
+                ground_truth_masks = torch.nn.functional.interpolate(
+                    ground_truth_masks.unsqueeze(1),
+                    size=predicted_masks.shape[-2:],
+                    mode="nearest",
+                ).squeeze(1)
+
+            val_loss = seg_loss(
+                predicted_masks,
+                ground_truth_masks.unsqueeze(1),
+            )
+            epoch_val_losses.append(val_loss.item())
+
+    mean_val_loss = mean(epoch_val_losses)
+    val_losses.append(mean_val_loss)
+
+    # ---- LR SCHEDULER: step on validation loss ----
+    scheduler.step(mean_val_loss)
+    current_lr = optimizer.param_groups[0]["lr"]
+
+    print(
+        f"Epoch {epoch+1}/{num_epochs} | "
+        f"Train Loss: {mean_train_loss:.4f} | "
+        f"Val Loss: {mean_val_loss:.6f} | "
+        f"LR: {current_lr:.2e}"
+    )
+
+    # ---- EARLY STOPPING ----
+    if mean_val_loss < best_val_loss - early_stopping_min_delta:
+        best_val_loss = mean_val_loss
+        epochs_without_improvement = 0
+
+        torch.save(model.state_dict(), best_model_path)
+        print(f"  ✅ New best val loss: {best_val_loss:.6f}. Model saved.")
+    else:
+        epochs_without_improvement += 1
+        print(f"  No meaningful improvement for {epochs_without_improvement} epoch(s).")
+
+        if epochs_without_improvement >= early_stopping_patience:
+            print("⏹ Early stopping triggered.")
+            break
+
+# Optionally reload best checkpoint
+model.load_state_dict(torch.load(best_model_path))
+
+# ==========================
+# PLOT LOSSES
+# ==========================
+plt.figure(figsize=(10, 4))
+plt.plot(train_losses, label="Train Loss", marker="o")
+plt.plot(val_losses, label="Validation Loss", marker="s")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Training vs Validation Loss (DiceFocal) with LR scheduling & early stopping")
+plt.legend()
+plt.grid(True)
+plt.savefig("training_validation_loss_curve.png", dpi=300, bbox_inches="tight")
+plt.show()
