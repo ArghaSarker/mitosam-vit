@@ -15,7 +15,6 @@ from utils import (
     percentile_normalize_batch,
 )
 
-
 # -------------------------------------------------------------------------
 # Config
 # -------------------------------------------------------------------------
@@ -26,205 +25,141 @@ np.random.seed(SEED)
 TRAIN_TIF = "/share/klab/argha/SAM_mitochondria/MitoSAM-ViT/data/raw/Dataset/training.tif"
 MASK_TIF  = "/share/klab/argha/SAM_mitochondria/MitoSAM-ViT/data/raw/Dataset/training_groundtruth.tif"
 
-OUT_DIR = Path("/share/klab/argha/SAM_mitochondria/MitoSAM-ViT/data/processed/")
+OUT_DIR = Path("/share/klab/argha/SAM_mitochondria/MitoSAM-ViT/data/processed")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+REPORT_DIR = Path("/share/klab/argha/SAM_mitochondria/MitoSAM-ViT/reports")
+REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 PATCH_SIZE = 256
 TRAIN_OVERLAP = 64
 VAL_OVERLAP = 32
 MIN_COVERAGE = 0.009
 
-N_DEBUG = 40  # kept as you requested
+N_DEBUG = None
 SHOW_SANITY_PLOTS = True
 
+# -------------------------------------------------------------------------
+# Load data
+# -------------------------------------------------------------------------
+large_images = tifffile.imread(TRAIN_TIF)
+large_masks  = tifffile.imread(MASK_TIF)
 
-def main():
-    # -------------------------------------------------------------------------
-    # Load data
-    # -------------------------------------------------------------------------
-    large_images = tifffile.imread(TRAIN_TIF)
-    large_masks  = tifffile.imread(MASK_TIF)
-
-    # Debug slice (kept)
+if N_DEBUG:
     large_images = large_images[:N_DEBUG]
     large_masks  = large_masks[:N_DEBUG]
 
-    print(
-        "Loaded:",
-        large_images.shape, large_images.dtype,
-        "min/max:", large_images.min(), large_images.max()
-    )
-    assert large_images.shape == large_masks.shape, "Image/mask stack mismatch!"
+assert large_images.shape == large_masks.shape, "Mismatch in image and mask stacks"
 
-    # -------------------------------------------------------------------------
-    # Train/val split at image level
-    # -------------------------------------------------------------------------
-    image_ids = list(range(len(large_images)))
-    train_ids, val_ids = train_test_split(
-        image_ids, test_size=0.2, random_state=SEED, shuffle=True
-    )
+# -------------------------------------------------------------------------
+# Train/val split
+# -------------------------------------------------------------------------
+ids = list(range(len(large_images)))
+train_ids, val_ids = train_test_split(ids, test_size=0.2, random_state=SEED, shuffle=True)
+train_images = large_images[train_ids]
+train_masks  = large_masks[train_ids]
+val_images   = large_images[val_ids]
+val_masks    = large_masks[val_ids]
 
-    train_images = large_images[train_ids]
-    train_masks  = large_masks[train_ids]
-    val_images   = large_images[val_ids]
-    val_masks    = large_masks[val_ids]
+# -------------------------------------------------------------------------
+# Extract patches
+# -------------------------------------------------------------------------
+train_filtered_imgs, train_filtered_msks = make_patch_dataset(
+    train_images, train_masks,
+    patch_size=PATCH_SIZE, overlap=TRAIN_OVERLAP, min_coverage=MIN_COVERAGE
+)
 
-    print(f"Train images: {train_images.shape}  Val images: {val_images.shape}")
+val_filtered_imgs, val_filtered_msks = make_patch_dataset(
+    val_images, val_masks,
+    patch_size=PATCH_SIZE, overlap=VAL_OVERLAP, min_coverage=MIN_COVERAGE
+)
 
-    # -------------------------------------------------------------------------
-    # Patch extraction + filtering
-    # -------------------------------------------------------------------------
-    train_filtered_imgs, train_filtered_msks = make_patch_dataset(
-        train_images, train_masks,
-        patch_size=PATCH_SIZE, overlap=TRAIN_OVERLAP,
-        min_coverage=MIN_COVERAGE
-    )
+# -------------------------------------------------------------------------
+# Visualize random samples
+# -------------------------------------------------------------------------
+if SHOW_SANITY_PLOTS:
+    n_cols = min(3, max(len(train_filtered_imgs), len(val_filtered_imgs)))
+    train_idxs = random.sample(range(len(train_filtered_imgs)), n_cols) if train_filtered_imgs else []
+    val_idxs = random.sample(range(len(val_filtered_imgs)), n_cols) if val_filtered_imgs else []
 
-    val_filtered_imgs, val_filtered_msks = make_patch_dataset(
-        val_images, val_masks,
-        patch_size=PATCH_SIZE, overlap=VAL_OVERLAP,
-        min_coverage=MIN_COVERAGE
-    )
+    fig, axes = plt.subplots(4, n_cols, figsize=(2 * n_cols, 8))
+    for i in range(n_cols):
+        t_idx = train_idxs[i] if i < len(train_idxs) else None
+        v_idx = val_idxs[i] if i < len(val_idxs) else None
 
-    # Optional sanity plot: random train/val patches
-    if SHOW_SANITY_PLOTS and (len(train_filtered_imgs) > 0 or len(val_filtered_imgs) > 0):
-        n_show = 3
-        n_cols = max(1, min(n_show, max(len(train_filtered_imgs), len(val_filtered_imgs))))
+        for r, (src, title) in enumerate([
+            (train_filtered_imgs, "Train Image"),
+            (train_filtered_msks, "Train Mask"),
+            (val_filtered_imgs, "Val Image"),
+            (val_filtered_msks, "Val Mask"),
+        ]):
+            if (idx := (t_idx if r < 2 else v_idx)) is not None:
+                axes[r, i].imshow(src[idx], cmap="gray")
+                axes[r, i].set_title(title)
+            axes[r, i].axis("off")
 
-        def safe_sample(n, k):
-            if n == 0:
-                return [None] * k
-            if n >= k:
-                return random.sample(range(n), k)
-            return [random.choice(range(n)) for _ in range(k)]
+    plt.tight_layout()
+    save_figure_png(fig, REPORT_DIR / "sanity_patch_grid.png")
+    plt.close(fig)
 
-        train_idxs = safe_sample(len(train_filtered_imgs), n_cols)
-        val_idxs   = safe_sample(len(val_filtered_imgs), n_cols)
+# -------------------------------------------------------------------------
+# Build augmenter
+# -------------------------------------------------------------------------
+geometric_tf, non_geometric_tf = build_augmenter(PATCH_SIZE)
 
-        fig, axes = plt.subplots(4, n_cols, figsize=(2 * n_cols, 8))
-        if n_cols == 1:
-            axes = axes.reshape(4, 1)
-
-        for c in range(n_cols):
-            t_idx, v_idx = train_idxs[c], val_idxs[c]
-
-            if t_idx is not None:
-                axes[0, c].imshow(train_filtered_imgs[t_idx], cmap="gray")
-                axes[1, c].imshow(train_filtered_msks[t_idx], cmap="gray")
-                axes[0, c].set_title(f"Train img {t_idx}")
-                axes[1, c].set_title("Train mask")
-            else:
-                axes[0, c].axis("off")
-                axes[1, c].axis("off")
-
-            if v_idx is not None:
-                axes[2, c].imshow(val_filtered_imgs[v_idx], cmap="gray")
-                axes[3, c].imshow(val_filtered_msks[v_idx], cmap="gray")
-                axes[2, c].set_title(f"Val img {v_idx}")
-                axes[3, c].set_title("Val mask")
-            else:
-                axes[2, c].axis("off")
-                axes[3, c].axis("off")
-
-            for r in range(4):
-                axes[r, c].axis("off")
-
-        fig.suptitle("Sample Train/Val Patches")
-        plt.tight_layout()
-        plt.show()
-
-    # -------------------------------------------------------------------------
-    # Build augmenter
-    # -------------------------------------------------------------------------
-    geometric_tf, non_geometric_tf = build_augmenter(PATCH_SIZE)
-
-    # -------------------------------------------------------------------------
-    # Augmentation sanity check: show one original + its augmentations
-    # -------------------------------------------------------------------------
-    if SHOW_SANITY_PLOTS and len(train_filtered_imgs) > 0:
-        parent_idx = 0  # change to random.randint(...) if you want random parent
-        parent_img = train_filtered_imgs[parent_idx]
-        parent_msk = train_filtered_msks[parent_idx]
-
-        sanity_pairs = augment_data(
-            parent_img, parent_msk,
-            geometric_tf, non_geometric_tf,
-            n_aug=3
-        )
-
-        n_cols = len(sanity_pairs)
-        fig, axes = plt.subplots(2, n_cols, figsize=(3 * n_cols, 6))
-        if n_cols == 1:
-            axes = axes.reshape(2, 1)
-
-        for i, (img, msk) in enumerate(sanity_pairs):
-            title_prefix = "Original" if i == 0 else f"Aug {i}"
-
-            axes[0, i].imshow(img, cmap="gray")
-            axes[0, i].set_title(f"{title_prefix} Image")
-            axes[0, i].axis("off")
-
-            axes[1, i].imshow(msk, cmap="gray")
-            axes[1, i].set_title(f"{title_prefix} Mask")
-            axes[1, i].axis("off")
-
-        fig.suptitle(f"Augmentation sanity check (parent patch #{parent_idx})")
-        plt.tight_layout()
-        save_figure_png(fig, f"augmentation_sanity_parent_{parent_idx}.png")
-        plt.show()
-
-    # -------------------------------------------------------------------------
-    # Augment training set (train only)
-    # -------------------------------------------------------------------------
-    train_augmented_imgs, train_augmented_msks = [], []
-    for img, msk in zip(train_filtered_imgs, train_filtered_msks):
-        pairs = augment_data(img, msk, geometric_tf, non_geometric_tf, n_aug=3)
-        for a_img, a_msk in pairs:
-            train_augmented_imgs.append(a_img)
-            train_augmented_msks.append(a_msk)
-
-    print(f"Original train patches: {len(train_filtered_imgs)}")
-    print(f"Augmented train samples: {len(train_augmented_imgs)}")
-
-    # -------------------------------------------------------------------------
-    # Percentile normalization (images only)
-    # -------------------------------------------------------------------------
-    train_data_norm = percentile_normalize_batch(train_augmented_imgs, pmin=1, pmax=99)
-    val_data_norm   = percentile_normalize_batch(val_filtered_imgs, pmin=1, pmax=99)
-
-    # Masks unchanged
-    train_masks_final = train_augmented_msks
-    val_masks_final   = val_filtered_msks
-
-    print("Normalization done.")
-    print(
-        f"Train norm dtype: {train_data_norm[0].dtype}, "
-        f"range: {train_data_norm[0].min():.3f}-{train_data_norm[0].max():.3f}"
-    )
-    print(
-        f"Val   norm dtype: {val_data_norm[0].dtype}, "
-        f"range: {val_data_norm[0].min():.3f}-{val_data_norm[0].max():.3f}"
+# -------------------------------------------------------------------------
+# Augmentation visualization
+# -------------------------------------------------------------------------
+if SHOW_SANITY_PLOTS and train_filtered_imgs:
+    parent_idx = 0
+    aug_pairs = augment_data(
+        train_filtered_imgs[parent_idx],
+        train_filtered_msks[parent_idx],
+        geometric_tf,
+        non_geometric_tf,
+        n_aug=3
     )
 
-    # -------------------------------------------------------------------------
-    # Save processed data
-    # -------------------------------------------------------------------------
-    train_images_to_save = np.asarray(train_data_norm, dtype=np.float32)
-    train_masks_to_save  = np.asarray(train_masks_final)
+    fig, axes = plt.subplots(2, len(aug_pairs), figsize=(4 * len(aug_pairs), 6))
+    for i, (img, msk) in enumerate(aug_pairs):
+        axes[0, i].imshow(img, cmap="gray")
+        axes[0, i].set_title(f"Aug Image {i}")
+        axes[0, i].axis("off")
 
-    val_images_to_save = np.asarray(val_data_norm, dtype=np.float32)
-    val_masks_to_save  = np.asarray(val_masks_final)
+        axes[1, i].imshow(msk, cmap="gray")
+        axes[1, i].set_title(f"Aug Mask {i}")
+        axes[1, i].axis("off")
 
-    train_out = OUT_DIR / "train_data_processed.npz"
-    val_out   = OUT_DIR / "val_data_processed.npz"
+    plt.tight_layout()
+    save_figure_png(fig, REPORT_DIR / f"augmentation_sanity_parent_{parent_idx}.png")
+    plt.close(fig)
 
-    np.savez_compressed(train_out, images=train_images_to_save, masks=train_masks_to_save)
-    np.savez_compressed(val_out, images=val_images_to_save, masks=val_masks_to_save)
+# -------------------------------------------------------------------------
+# Apply augmentation
+# -------------------------------------------------------------------------
+train_aug_imgs, train_aug_msks = [], []
+for img, msk in zip(train_filtered_imgs, train_filtered_msks):
+    pairs = augment_data(img, msk, geometric_tf, non_geometric_tf, n_aug=3)
+    for i, (aug_img, aug_msk) in enumerate(pairs):
+        train_aug_imgs.append(aug_img)
+        train_aug_msks.append(aug_msk)
 
-    print(f"Saved train: {train_out} -> images {train_images_to_save.shape}, masks {train_masks_to_save.shape}")
-    print(f"Saved val:   {val_out} -> images {val_images_to_save.shape}, masks {val_masks_to_save.shape}")
-    print("Done.")
+# -------------------------------------------------------------------------
+# Normalize
+# -------------------------------------------------------------------------
+train_imgs_norm = percentile_normalize_batch(train_aug_imgs, pmin=1, pmax=99)
+val_imgs_norm   = percentile_normalize_batch(val_filtered_imgs, pmin=1, pmax=99)
 
+train_imgs_np = np.asarray(train_imgs_norm, dtype=np.float32)
+val_imgs_np   = np.asarray(val_imgs_norm, dtype=np.float32)
+train_msks_np = np.asarray(train_aug_msks, dtype=np.uint8)
+val_msks_np   = np.asarray(val_filtered_msks, dtype=np.uint8)
 
-if __name__ == "__main__":
-    main()
+# -------------------------------------------------------------------------
+# Save processed data
+# -------------------------------------------------------------------------
+np.savez_compressed(OUT_DIR / "train_data_processed.npz", images=train_imgs_np, masks=train_msks_np)
+np.savez_compressed(OUT_DIR / "val_data_processed.npz", images=val_imgs_np, masks=val_msks_np)
+
+print(f"✅ Saved training set: {train_imgs_np.shape} | {train_msks_np.shape}")
+print(f"✅ Saved validation set: {val_imgs_np.shape} | {val_msks_np.shape}")

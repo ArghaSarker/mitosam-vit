@@ -84,11 +84,11 @@ except Exception as e:
 # 2. Debug subset (keep exactly as you had it)
 # -------------------------------------------------------------------------
 
-train_img = train_img[:20]
-train_mask = train_mask[:20]
+# train_img = train_img[:20]
+# train_mask = train_mask[:20]
 
-val_img = val_img[:5]
-val_mask = val_mask[:5]
+# val_img = val_img[:5]
+# val_mask = val_mask[:5]
 
 print("\nAfter debug slicing:")
 print(f"  'train_img' shape: {train_img.shape}, dtype: {train_img.dtype}")
@@ -258,7 +258,7 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 model.to(device)
 
-# Segmentation loss (same setup as tutorial)
+# Segmentation loss 
 seg_loss = DiceFocalLoss(
     sigmoid=True,
     lambda_dice=1.0,
@@ -297,10 +297,10 @@ epochs_without_improvement = 0
 best_model_path = MODELS_DIR / "sam_lora_best.pth"
 
 # -------------------------------------------------------------------------
-# 10. Training + validation loop (no manual resize, like the tutorial)
+# 10. Training + validation loop 
 # -------------------------------------------------------------------------
 
-num_epochs = 3
+num_epochs = 200
 train_losses, val_losses = [], []
 
 for epoch in range(num_epochs):

@@ -65,11 +65,11 @@ except Exception as e:
 
 ## keep this fromats. its just for debugging the whole workflow. 
 
-train_img = train_img [:20]
-train_mask = train_mask[:20]
+# train_img = train_img [:20]
+# train_mask = train_mask[:20]
 
-val_img = val_img [:5]
-val_mask = val_mask[:5]
+# val_img = val_img [:5]
+# val_mask = val_mask[:5]
 
 print(f"  'train_img' shape: {train_img.shape}, dtype: {train_img.dtype}")
 print(f"  'train_mask' shape: {train_mask.shape}, dtype: {train_mask.dtype}")
