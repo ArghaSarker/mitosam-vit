@@ -2,186 +2,198 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from PIL import Image
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Tuple
 
 
-def visualize_sam_sample(
-    dataset_or_sample: Mapping[str, Any] | Any,
-    idx: Optional[int] = None,
-    figsize: Tuple[int, int] = (12, 4),
-    print_info: bool = True,
-):
-    """
-    Visualize one processed sample from SAMDataset (or a single sample dict).
+def _add_grid_with_ticks(
+    ax: plt.Axes,
+    height: int,
+    width: int,
+    xlabel: str | None = None,
+    ylabel: str | None = None,
+) -> None:
+    """Add a coarse grid and integer ticks to an image axis."""
+    step_x = max(width // 10, 1)
+    step_y = max(height // 10, 1)
 
-    Panels:
-      1) SAM input image (resized, normalized by SamProcessor)
-      2) Ground-truth mask (resized to SAM image size)
-      3) Overlay of mask + SAM bounding box
+    ax.set_xticks(np.arange(0, width, step_x))
+    ax.set_yticks(np.arange(0, height, step_y))
+    ax.tick_params(axis="both", labelsize=6, pad=1)
 
-    Titles include:
-      - Image size (H, W) at SAM resolution
-      - Bbox coordinates (x_min, y_min, x_max, y_max)
-      - Original & reshaped sizes if available in the sample
+    for label in ax.get_xticklabels():
+        label.set_rotation(90)
+        label.set_verticalalignment("center")
+        label.set_horizontalalignment("right")
 
-    Args:
-        dataset_or_sample:
-            - A dataset-like object (supports __getitem__), OR
-            - A single sample dict with keys:
-                'pixel_values', 'ground_truth_mask', 'input_boxes'
-              (and optionally 'original_sizes', 'reshaped_input_sizes')
-        idx:
-            - If not None, we use dataset_or_sample[idx] as the sample.
-            - If None, dataset_or_sample is assumed to be the sample itself.
-        figsize:
-            - Matplotlib figure size.
-        print_info:
-            - Whether to print shapes and bbox info in the console.
+    if xlabel is not None:
+        ax.set_xlabel(xlabel, fontsize=6)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel, fontsize=6)
 
-    Returns:
-        fig, axes: Matplotlib Figure and Axes array (1x3).
-    """
-    # ---------- 1. Get sample dict ----------
-    if idx is not None:
-        sample = dataset_or_sample[idx]
-    else:
-        sample = dataset_or_sample
+    ax.grid(True, linestyle=":", linewidth=0.4, alpha=0.5)
 
-    pixel_values = sample["pixel_values"]
-    mask = sample["ground_truth_mask"]
-    bbox = sample["input_boxes"]
 
-    # Optional extra info from SamProcessor (if present)
-    orig_size = sample.get("original_sizes", None)
-    reshaped_size = sample.get("reshaped_input_sizes", None)
+def visualize_sam_sample(sam_dataset: Any, idx: int) -> Tuple[plt.Figure, np.ndarray]:
+    """Visualize a SAMDataset sample: image, mask, and processed SAM input."""
+    entry = sam_dataset.samples[idx]
+    image_pil = entry["image"]
+    mask_np = np.array(entry["mask"])
+    bbox = entry["bbox"]  # [x_min, y_min, x_max, y_max]
 
-    # ---------- 2. Convert pixel_values -> numpy RGB in [0,1] ----------
-    if isinstance(pixel_values, torch.Tensor):
-        img = pixel_values.detach().cpu()
-        # (C,H,W) -> (H,W,C) if needed
-        if img.ndim == 3 and img.shape[0] in (1, 3):
-            img = img.permute(1, 2, 0)
-        img = img.numpy()
-    else:
-        img = np.array(pixel_values)
+    processor = sam_dataset.processor
 
-    img = img.astype(np.float32)
-    img_min, img_max = img.min(), img.max()
-    if img_max > img_min:
-        img = (img - img_min) / (img_max - img_min)
-    else:
-        img = np.zeros_like(img, dtype=np.float32)
-
-    # Ensure 3 channels for overlay
-    if img.ndim == 2:
-        img_rgb = np.stack([img] * 3, axis=-1)
-    elif img.ndim == 3 and img.shape[2] == 1:
-        img_rgb = np.repeat(img, 3, axis=-1)
-    else:
-        img_rgb = img
-
-    H_sam, W_sam = img_rgb.shape[:2]  # SAM-resolution size
-
-    # ---------- 3. Convert mask -> 2D uint8, resize to (H_sam, W_sam) ----------
-    if isinstance(mask, torch.Tensor):
-        mask_np = mask.detach().cpu().numpy()
-    else:
-        mask_np = np.array(mask)
-
-    if mask_np.ndim > 2:
-        mask_np = np.squeeze(mask_np)
-
-    mask_np = mask_np.astype(np.uint8)
-
-    if mask_np.shape != (H_sam, W_sam):
-        mask_resized = np.array(
-            Image.fromarray(mask_np).resize((W_sam, H_sam), Image.NEAREST)
-        )
-    else:
-        mask_resized = mask_np
-
-    # ---------- 4. Convert bbox -> numpy (4,) ----------
-    if isinstance(bbox, torch.Tensor):
-        bbox_np = bbox.detach().cpu().numpy()
-    else:
-        bbox_np = np.array(bbox)
-
-    # Handle shapes like (1,4) or (1,1,4)
-    bbox_np = np.array(bbox_np).reshape(-1, 4)[0]
-    x_min, y_min, x_max, y_max = bbox_np
-
-    # ---------- 5. Build overlay (mask in red) ----------
-    overlay = img_rgb.copy()
-    overlay[mask_resized > 0] = [1.0, 0.0, 0.0]
-
-    # ---------- 6. Plot ----------
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
-
-    # Build optional text for original / reshaped sizes
-    size_info = ""
-    if orig_size is not None:
-        # orig_size is typically a tensor [H_orig, W_orig]
-        if isinstance(orig_size, torch.Tensor):
-            orig = orig_size.detach().cpu().numpy().tolist()
-        else:
-            orig = np.array(orig_size).tolist()
-        size_info += f"orig={orig}"
-    if reshaped_size is not None:
-        if size_info:
-            size_info += ", "
-        if isinstance(reshaped_size, torch.Tensor):
-            resh = reshaped_size.detach().cpu().numpy().tolist()
-        else:
-            resh = np.array(reshaped_size).tolist()
-        size_info += f"reshaped={resh}"
-
-    # Panel 1: SAM input
-    title_img = f"SAM Input Image (H={H_sam}, W={W_sam})"
-    if size_info:
-        title_img += f"\n{size_info}"
-    axes[0].imshow(img_rgb)
-    axes[0].set_title(title_img, fontsize=9)
-    axes[0].axis("off")
-
-    # Panel 2: resized mask
-    title_mask = f"Mask (resized to H={H_sam}, W={W_sam})"
-    axes[1].imshow(mask_resized, cmap="gray")
-    axes[1].set_title(title_mask, fontsize=9)
-    axes[1].axis("off")
-
-    # Panel 3: overlay + bbox
-    title_overlay = (
-        f"Overlay + Box\n"
-        f"bbox=[{x_min:.1f}, {y_min:.1f}, {x_max:.1f}, {y_max:.1f}]"
+    inputs = processor(
+        image_pil,
+        input_boxes=[[bbox]],
+        return_tensors="pt",
     )
-    axes[2].imshow(overlay)
-    rect = patches.Rectangle(
+
+    image_np = np.array(image_pil)
+
+    print("ORIGINAL IMAGE:")
+    print("  shape:", image_np.shape)
+    print("  dtype:", image_np.dtype)
+    print("  min/max:", image_np.min(), image_np.max())
+
+    print("\nORIGINAL MASK:")
+    print("  shape:", mask_np.shape)
+    print("  dtype:", mask_np.dtype)
+    print("  min/max:", mask_np.min(), mask_np.max())
+
+    print("\nBBOX (original coords):", bbox)
+
+    print("\n=== Processor outputs ===")
+    for k, v in inputs.items():
+        if torch.is_tensor(v):
+            v_min = v.min().item() if v.numel() else "n/a"
+            v_max = v.max().item() if v.numel() else "n/a"
+            print(f"{k}: shape={v.shape}, dtype={v.dtype}, min={v_min}, max={v_max}")
+        else:
+            print(f"{k}: type={type(v)} -> {v}")
+
+    bbox_proc = inputs["input_boxes"][0, 0].detach().cpu().numpy()
+    print("\nBBOX (processor/model coords):", bbox_proc)
+
+    h0, w0 = image_np.shape[:2]
+    H_in, W_in = inputs["reshaped_input_sizes"][0].tolist()
+    scale_x = W_in / w0
+    scale_y = H_in / h0
+    bbox_scaled_manual = np.array(
+        [
+            bbox[0] * scale_x,
+            bbox[1] * scale_y,
+            bbox[2] * scale_x,
+            bbox[3] * scale_y,
+        ]
+    )
+    print("BBOX manually scaled:", bbox_scaled_manual)
+
+    pv_tensor = inputs["pixel_values"]
+    pv_min = pv_tensor.min().item()
+    pv_max = pv_tensor.max().item()
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+
+    # Original image + bbox
+    ax0 = axes[0]
+    ax0.imshow(image_np, cmap="gray")
+    x_min, y_min, x_max, y_max = bbox
+    rect0 = plt.Rectangle(
         (x_min, y_min),
         x_max - x_min,
         y_max - y_min,
-        linewidth=2,
-        edgecolor="yellow",
+        edgecolor="red",
         facecolor="none",
+        linewidth=2,
     )
-    axes[2].add_patch(rect)
-    axes[2].set_title(title_overlay, fontsize=9)
-    axes[2].axis("off")
+    ax0.add_patch(rect0)
+    ax0.set_title(
+        "Original image + bbox\n"
+        f"shape={image_np.shape}, dtype={image_np.dtype}\n"
+        f"min={image_np.min():.3g}, max={image_np.max():.3g}",
+        fontsize=7,
+    )
+    h, w = image_np.shape[:2]
+    _add_grid_with_ticks(ax0, h, w, xlabel="x", ylabel="y")
+
+    # Mask + bbox
+    ax1 = axes[1]
+    ax1.imshow(mask_np, cmap="gray")
+    rect1 = plt.Rectangle(
+        (x_min, y_min),
+        x_max - x_min,
+        y_max - y_min,
+        edgecolor="red",
+        facecolor="none",
+        linewidth=2,
+    )
+    ax1.add_patch(rect1)
+    ax1.set_title(
+        "Mask + bbox\n"
+        f"bbox={bbox}\n"
+        f"shape={mask_np.shape}, dtype={mask_np.dtype}, "
+        f"min={mask_np.min():.3g}, max={mask_np.max():.3g}",
+        fontsize=7,
+    )
+    mh, mw = mask_np.shape[:2]
+    _add_grid_with_ticks(ax1, mh, mw, xlabel="x", ylabel="y")
+
+    # SAM input (pixel_values) + processed bbox
+    ax2 = axes[2]
+    pv = pv_tensor[0].detach().cpu()         # (3, H, W)
+    pv_np = pv.permute(1, 2, 0).numpy()      # (H, W, 3)
+    pv_np_vis = (pv_np - pv_np.min()) / (pv_np.max() - pv_np.min() + 1e-8)
+
+    ax2.imshow(pv_np_vis)
+    x_min_p, y_min_p, x_max_p, y_max_p = bbox_proc
+    rect2 = plt.Rectangle(
+        (x_min_p, y_min_p),
+        x_max_p - x_min_p,
+        y_max_p - y_min_p,
+        edgecolor="lime",
+        facecolor="none",
+        linewidth=2,
+    )
+    ax2.add_patch(rect2)
+    ax2.set_title(
+        "Model input + processed bbox\n"
+        f"input size=({H_in}, {W_in}), bbox={np.round(bbox_proc, 1)}\n"
+        f"pixel_values min={pv_min:.3g}, max={pv_max:.3g}",
+        fontsize=7,
+    )
+    _add_grid_with_ticks(ax2, H_in, W_in, xlabel="x", ylabel="y")
 
     plt.tight_layout()
-
-    # ---------- 7. Optional console logging ----------
-    if print_info:
-        idx_str = f"{idx}" if idx is not None else "<direct sample>"
-        print(f"Sample #{idx_str}")
-        print(f"  SAM image size:   (H={H_sam}, W={W_sam})")
-        if orig_size is not None:
-            print(f"  original_sizes:   {sample['original_sizes']}")
-        if reshaped_size is not None:
-            print(f"  reshaped_sizes:   {sample['reshaped_input_sizes']}")
-        print(f"  pixel_values shape: {sample['pixel_values'].shape}")
-        print(f"  input_boxes (first): {bbox_np}")
-        print(f"  mask (resized) shape: {mask_resized.shape}, "
-              f"unique values: {np.unique(mask_resized)}")
-
     return fig, axes
+
+
+def compute_batch_dice_iou(
+    pred_logits: torch.Tensor,
+    gt_masks: torch.Tensor,
+    threshold: float = 0.5,
+    eps: float = 1e-6,
+) -> Tuple[float, float]:
+    """Compute mean Dice and IoU over a batch of predicted masks."""
+    if pred_logits.ndim == 5:
+        pred_logits = pred_logits.squeeze(2)  # (B, 1, H, W)
+    elif pred_logits.ndim == 3:
+        pred_logits = pred_logits.unsqueeze(1)  # (B, 1, H, W)
+
+    probs = torch.sigmoid(pred_logits)
+
+    if gt_masks.ndim == 3:
+        gt_masks = gt_masks.unsqueeze(1)
+    gt_masks = (gt_masks > 0.5).float()
+
+    preds = (probs > threshold).float()
+
+    dims = (1, 2, 3)
+    intersection = (preds * gt_masks).sum(dim=dims)
+    pred_area = preds.sum(dim=dims)
+    gt_area = gt_masks.sum(dim=dims)
+    union = pred_area + gt_area - intersection
+
+    dice = (2 * intersection + eps) / (pred_area + gt_area + eps)
+    iou = (intersection + eps) / (union + eps)
+
+    return dice.mean().item(), iou.mean().item()

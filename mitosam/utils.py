@@ -255,3 +255,47 @@ def plot_random_image_mask_pairs(
     plt.tight_layout()
     return fig, axes
 
+
+
+
+def normalize_heatmap(x: np.ndarray, p_low: float = 2.0, p_high: float = 98.0) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
+    x = np.squeeze(x)
+
+    if not np.isfinite(x).all():
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+    lo = np.percentile(x, p_low)
+    hi = np.percentile(x, p_high)
+    if hi <= lo + 1e-8:
+        return np.zeros_like(x, dtype=np.float32)
+
+    x = np.clip(x, lo, hi)
+    x = (x - lo) / (hi - lo + 1e-8)
+    return x.astype(np.float32)
+
+
+def make_tp_fp_fn_overlay(gray: np.ndarray, gt: np.ndarray, pred: np.ndarray, alpha: float = 0.70) -> np.ndarray:
+    gray = np.squeeze(gray).astype(np.float32)
+    if gray.max() > 1.0:
+        gray = gray / 255.0
+
+    gt = np.squeeze(gt).astype(bool)
+    pred = np.squeeze(pred).astype(bool)
+
+    tp = gt & pred
+    fn = gt & (~pred)
+    fp = (~gt) & pred
+
+    base_rgb = np.stack([gray, gray, gray], axis=-1)
+
+    overlay = np.zeros_like(base_rgb, dtype=np.float32)
+    overlay[tp] = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    overlay[fn] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    overlay[fp] = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+    mask = tp | fn | fp
+    out = base_rgb.copy()
+    out[mask] = (1.0 - alpha) * base_rgb[mask] + alpha * overlay[mask]
+    out = np.clip(out, 0.0, 1.0)
+    return (out * 255.0).astype(np.uint8)

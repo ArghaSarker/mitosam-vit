@@ -42,7 +42,7 @@ conda activate thesis2
 
 
 
-srun python /share/klab/argha/SAM_mitochondria/MitoSAM-ViT/mitosam/fine_tune_clean.py
+srun python /share/klab/argha/SAM_mitochondria/MitoSAM-ViT/mitosam/fine_tune_final_script.py
 
 
 

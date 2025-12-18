@@ -28,9 +28,9 @@ def get_bounding_boxes(mask, perturb=True, max_perturb=20):
 
         if perturb:
             x_min = max(0, x_min - np.random.randint(0, max_perturb))
-            x_max = min(W, x_max + np.random.randint(0, max_perturb))
+            x_max = min(W-1, x_max + np.random.randint(0, max_perturb))
             y_min = max(0, y_min - np.random.randint(0, max_perturb))
-            y_max = min(H, y_max + np.random.randint(0, max_perturb))
+            y_max = min(H-1, y_max + np.random.randint(0, max_perturb))
 
         boxes.append([x_min, y_min, x_max, y_max])
 
@@ -69,7 +69,17 @@ def get_union_bounding_box(mask, perturb: bool = True, max_perturb: int = 20):
     return [x_min, y_min, x_max, y_max]
 
 
+def build_point_grid_prompt(H: int, W: int, grid_size: int = 15):
+    xs = np.linspace(0, W - 1, grid_size, dtype=np.float32)
+    ys = np.linspace(0, H - 1, grid_size, dtype=np.float32)
+    xv, yv = np.meshgrid(xs, ys)
 
+    pts = np.stack([xv.reshape(-1), yv.reshape(-1)], axis=1).astype(np.float32)  # (N,2)
+    points = [[[float(x), float(y)]] for (x, y) in pts]  # (N,1,2) as python lists
+    labels = [[1] for _ in range(len(points))]           # (N,1)
+    return points, labels
+
+    
 
 
 def build_sam_prompt_dataset(
@@ -191,7 +201,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-
 def visualize_prompted_dataset(
     expanded_data,
     n_cols: int = 5,
@@ -203,22 +212,8 @@ def visualize_prompted_dataset(
     """
     Visualize samples from an expanded dataset.
 
-    Top row:  images
-    Bottom row: masks with bounding boxes
-
-    Args:
-        expanded_data: list of dicts, each like
-            {"image": img, "mask": mask, "bbox": [x_min, y_min, x_max, y_max]}
-            or
-            {"image": img, "mask": mask, "bboxes": [[...], [...], ...]}
-        n_cols: number of samples to show in one row.
-        cell_size: base size of each cell in inches.
-        start_idx: starting index (used when random_pick=False).
-        random_pick: if True, choose random samples instead of sequential.
-        seed: random seed for reproducibility when random_pick=True.
-
-    Returns:
-        fig, axes: Matplotlib Figure and Axes array.
+    Top row:  images (+ stats)
+    Bottom row: masks (+ stats) with bounding boxes and coordinate grid
     """
     total = len(expanded_data)
     if total == 0:
@@ -247,6 +242,18 @@ def visualize_prompted_dataset(
         img = np.array(entry["image"])
         mask = np.array(entry["mask"])
 
+        # --- image statistics ---
+        img_shape = img.shape
+        img_dtype = img.dtype
+        img_min = float(img.min())
+        img_max = float(img.max())
+
+        # --- mask statistics ---
+        mask_shape = mask.shape
+        mask_dtype = mask.dtype
+        mask_min = float(mask.min())
+        mask_max = float(mask.max())
+
         # Support both "bbox" and "bboxes" formats
         if "bbox" in entry and entry["bbox"] is not None:
             bboxes = [entry["bbox"]]
@@ -258,35 +265,69 @@ def visualize_prompted_dataset(
         # --- Top row: image ---
         ax_img = axes[0, col]
         ax_img.imshow(img, cmap="gray")
-        ax_img.set_title(f"Image #{idx}", fontsize=8)
+        ax_img.set_title(
+            f"Image #{idx}\n"
+            f"shape={img_shape}, dtype={img_dtype}, "
+            f"min={img_min:.3g}, max={img_max:.3g}",
+            fontsize=5,  # smaller font
+        )
         ax_img.axis("off")
 
-        # --- Bottom row: mask + bbox(es) ---
+        # --- Bottom row: mask + bbox(es) + grid ---
         ax_mask = axes[1, col]
         ax_mask.imshow(mask, cmap="gray")
 
+        # draw bounding boxes
         for box in bboxes:
             x_min, y_min, x_max, y_max = box
             rect = patches.Rectangle(
                 (x_min, y_min),
                 x_max - x_min,
                 y_max - y_min,
-                linewidth=1.5,
+                linewidth=1.0,
                 edgecolor="red",
                 facecolor="none",
             )
             ax_mask.add_patch(rect)
 
+        # bbox info line
         if len(bboxes) == 1:
-            title = f"bbox={bboxes[0]}"
+            bbox_info = f"bbox={bboxes[0]}"
         elif len(bboxes) > 1:
-            title = f"{len(bboxes)} boxes"
+            bbox_info = f"{len(bboxes)} boxes"
         else:
-            title = "no bbox"
+            bbox_info = "no bbox"
 
-        ax_mask.set_title(title, fontsize=7)
-        ax_mask.axis("off")
+        # title with bbox info + mask stats
+        ax_mask.set_title(
+            f"{bbox_info}\n"
+            f"shape={mask_shape}, dtype={mask_dtype}, "
+            f"min={mask_min:.3g}, max={mask_max:.3g}",
+            fontsize=5,
+        )
 
-    fig.suptitle("top : image, Bottom: mask + prompt", fontsize=10)
+        # show coordinate grid & ticks so bbox coords are interpretable
+        h, w = mask_shape[:2]
+        step_x = max(w // 10, 1)
+        step_y = max(h // 10, 1)
+        ax_mask.set_xticks(np.arange(0, w, step_x))
+        ax_mask.set_yticks(np.arange(0, h, step_y))
+
+        # small labels + rotated x labels
+        ax_mask.tick_params(axis="both", labelsize=5, pad=1)
+        for label in ax_mask.get_xticklabels():
+            label.set_rotation(90)
+            label.set_verticalalignment("center")
+            label.set_horizontalalignment("right")
+
+        ax_mask.set_xlabel("x", fontsize=5)
+        ax_mask.set_ylabel("y", fontsize=5)
+
+        ax_mask.grid(True, linestyle=":", linewidth=0.3, alpha=0.4)
+
+    fig.suptitle(
+        "top: image (+ stats), bottom: mask (+ stats) + bboxes + grid",
+        fontsize=8,
+    )
     plt.tight_layout(pad=1.0)
     return fig, axes

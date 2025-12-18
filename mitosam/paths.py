@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # This file lives in: MitoSAM-ViT/mitosam/paths.py
-# Project root is the directory that contains "mitosam", "data", "notebooks", etc.
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Data directories
