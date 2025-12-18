@@ -1,6 +1,10 @@
 # Data
 /data/
 
+# Large artifacts
+/models/
+/notebooks/
+
 # Mac OS-specific storage files
 .DS_Store
 
