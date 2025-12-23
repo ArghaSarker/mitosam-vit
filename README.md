@@ -38,7 +38,7 @@ For this reason, to fine-tune on a small dataset and reduce GPU requirements, **
 In this experiment, I applied **LoRA** to the **ViT image encoder** and **fully fine-tuned the mask decoder**, while keeping the prompt encoder and the original image encoder weights frozen.
 
 
-<img src="/share/klab/argha/SAM_mitochondria/MitoSAM-ViT/reports/figures/sam_Lora_finetuning.jpg" width="900">
+<img src="reports/figures/sam_Lora_finetuning.png" width="900">
 
 
 
